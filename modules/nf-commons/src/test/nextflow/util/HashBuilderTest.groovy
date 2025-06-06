@@ -18,13 +18,18 @@ package nextflow.util
 
 import java.nio.file.Files
 import java.nio.file.Paths
+import java.nio.file.Path
 
 import com.google.common.hash.Hashing
+import com.google.common.hash.Hasher
+import com.google.common.hash.HashCode
 import nextflow.Global
 import nextflow.Session
 import org.apache.commons.codec.digest.DigestUtils
 import spock.lang.Specification
 import test.TestHelper
+import spock.lang.Unroll
+
 /**
  *
  * @author Paolo Di Tommaso <paolo.ditommaso@gmail.com>
@@ -126,5 +131,85 @@ class HashBuilderTest extends Specification {
         then:
         hash1.hash() == hash2.hash()
 
+    }
+
+    @Unroll
+    def 'hash should be consistent when using filesystem trick: #description'() {
+        given: "Two directories to be filled with identical content using different strategies"
+        Path dir1 = TestHelper.createInMemTempDir()
+        Path dir2 = TestHelper.createInMemTempDir()
+
+        and: "A 'control' setup creating files alphabetically"
+        def controlSetup = { Path dir ->
+            dir.resolve('a.txt').text = 'content-a'
+            dir.resolve('b.txt').text = 'content-b'
+            dir.resolve('subdir').mkdir()
+            dir.resolve('subdir/c.txt').text = 'content-c'
+            dir.resolve('z.txt').text = 'content-z'
+        }
+
+        and: "An 'experimental' setup that applies a filesystem trick"
+        def experimentalSetup = setupClosure
+
+        // Create the two directories
+        controlSetup(dir1)
+        experimentalSetup(dir2)
+
+        when: "Hashes for both directories are calculated"
+        def hasher1 = HashBuilder.defaultHasher()
+        HashBuilder.hashDirSha256(hasher1, dir1, dir1)
+        def hash1 = hasher1.hash()
+
+        def hasher2 = HashBuilder.defaultHasher()
+        HashBuilder.hashDirSha256(hasher2, dir2, dir2)
+        def hash2 = hasher2.hash()
+
+        then: "The hashes must be identical, as the new code sorts paths internally"
+        hash1 == hash2
+
+        where:
+        description                      | setupClosure
+        'Reverse Creation Order'         | { Path dir ->
+                                                // Technique: Create files in the reverse order of the control setup.
+                                                // Goal: On simple filesystems, entry order might follow creation order.
+                                                dir.resolve('z.txt').text = 'content-z'
+                                                dir.resolve('subdir').mkdir()
+                                                dir.resolve('subdir/c.txt').text = 'content-c'
+                                                dir.resolve('b.txt').text = 'content-b'
+                                                dir.resolve('a.txt').text = 'content-a'
+                                            }
+
+        'Delete and Re-create Middle'    | { Path dir ->
+                                                // Technique: Delete an entry from the middle of an alphabetical set and re-add it.
+                                                // Goal: The re-added entry might be appended to the end of the directory list.
+                                                dir.resolve('a.txt').text = 'content-a'
+                                                dir.resolve('b.txt').text = 'content-b'
+                                                dir.resolve('subdir').mkdir()
+                                                dir.resolve('subdir/c.txt').text = 'content-c'
+                                                dir.resolve('z.txt').text = 'content-z'
+                                                // Now, delete and re-create 'b.txt'
+                                                dir.resolve('b.txt').delete()
+                                                dir.resolve('b.txt').text = 'content-b'
+                                            }
+
+        'Rename-Shuffle'                 | { Path dir ->
+                                                // Technique: Create files with temporary names and rename them in a non-alphabetical order.
+                                                // Goal: The final directory entry order might be influenced by the timing of the rename operations.
+                                                def tmpA = dir.resolve('tmp-a')
+                                                def tmpB = dir.resolve('tmp-b')
+                                                def tmpS = dir.resolve('tmp-s')
+                                                def tmpZ = dir.resolve('tmp-z')
+                                                // Create temp files/dirs
+                                                tmpA.text = 'content-a'
+                                                tmpB.text = 'content-b'
+                                                tmpS.mkdir()
+                                                tmpS.resolve('c.txt').text = 'content-c'
+                                                tmpZ.text = 'content-z'
+                                                // Rename in reverse order
+                                                Files.move(tmpZ, dir.resolve('z.txt'))
+                                                Files.move(tmpS, dir.resolve('subdir'))
+                                                Files.move(tmpB, dir.resolve('b.txt'))
+                                                Files.move(tmpA, dir.resolve('a.txt'))
+                                            }
     }
 }
