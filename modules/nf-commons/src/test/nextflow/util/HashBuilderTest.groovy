@@ -134,26 +134,32 @@ class HashBuilderTest extends Specification {
     }
 
     @Unroll
-    def 'hash should be consistent when using filesystem trick: #description'() {
+    def 'hash should be consistent when using filesystem trick with 20+ files: #description'() {
         given: "Two directories to be filled with identical content using different strategies"
         Path dir1 = TestHelper.createInMemTempDir()
         Path dir2 = TestHelper.createInMemTempDir()
+        int fileCount = 20
 
         and: "A 'control' setup creating files alphabetically"
         def controlSetup = { Path dir ->
-            dir.resolve('a.txt').text = 'content-a'
-            dir.resolve('b.txt').text = 'content-b'
-            dir.resolve('subdir').mkdir()
-            dir.resolve('subdir/c.txt').text = 'content-c'
-            dir.resolve('z.txt').text = 'content-z'
+            // Create 20 files in the root directory
+            (1..fileCount).each { i ->
+                dir.resolve(String.format("root-file-%02d.txt", i)).text = "content for root file ${i}"
+            }
+            // Create a subdirectory and 20 files within it
+            def subdir = dir.resolve('subdir')
+            subdir.mkdir()
+            (1..fileCount).each { i ->
+                subdir.resolve(String.format("sub-file-%02d.txt", i)).text = "content for sub file ${i}"
+            }
         }
 
         and: "An 'experimental' setup that applies a filesystem trick"
         def experimentalSetup = setupClosure
 
-        // Create the two directories
+        // Create the two directories using the defined setups
         controlSetup(dir1)
-        experimentalSetup(dir2)
+        experimentalSetup(dir2, fileCount)
 
         when: "Hashes for both directories are calculated"
         def hasher1 = HashBuilder.defaultHasher()
@@ -165,51 +171,72 @@ class HashBuilderTest extends Specification {
         def hash2 = hasher2.hash()
 
         then: "The hashes must be identical, as the new code sorts paths internally"
+        // The old, buggy code would fail here if the traversal order was successfully manipulated.
         hash1 == hash2
 
         where:
         description                      | setupClosure
-        'Reverse Creation Order'         | { Path dir ->
+        'Reverse Creation Order'         | { Path dir, int count ->
                                                 // Technique: Create files in the reverse order of the control setup.
                                                 // Goal: On simple filesystems, entry order might follow creation order.
-                                                dir.resolve('z.txt').text = 'content-z'
-                                                dir.resolve('subdir').mkdir()
-                                                dir.resolve('subdir/c.txt').text = 'content-c'
-                                                dir.resolve('b.txt').text = 'content-b'
-                                                dir.resolve('a.txt').text = 'content-a'
+                                                def subdir = dir.resolve('subdir')
+                                                subdir.mkdir()
+                                                // Create subdirectory files in reverse
+                                                (count..1).each { i ->
+                                                    subdir.resolve(String.format("sub-file-%02d.txt", i)).text = "content for sub file ${i}"
+                                                }
+                                                // Create root files in reverse
+                                                (count..1).each { i ->
+                                                    dir.resolve(String.format("root-file-%02d.txt", i)).text = "content for root file ${i}"
+                                                }
                                             }
 
-        'Delete and Re-create Middle'    | { Path dir ->
+        'Delete and Re-create Middle'    | { Path dir, int count ->
                                                 // Technique: Delete an entry from the middle of an alphabetical set and re-add it.
                                                 // Goal: The re-added entry might be appended to the end of the directory list.
-                                                dir.resolve('a.txt').text = 'content-a'
-                                                dir.resolve('b.txt').text = 'content-b'
-                                                dir.resolve('subdir').mkdir()
-                                                dir.resolve('subdir/c.txt').text = 'content-c'
-                                                dir.resolve('z.txt').text = 'content-z'
-                                                // Now, delete and re-create 'b.txt'
-                                                dir.resolve('b.txt').delete()
-                                                dir.resolve('b.txt').text = 'content-b'
+                                                def subdir = dir.resolve('subdir')
+                                                subdir.mkdir()
+                                                (1..count).each { i ->
+                                                    dir.resolve(String.format("root-file-%02d.txt", i)).text = "content for root file ${i}"
+                                                    subdir.resolve(String.format("sub-file-%02d.txt", i)).text = "content for sub file ${i}"
+                                                }
+                                                
+                                                // Now, delete and re-create a file from the middle of the sequence
+                                                def midFileIndex = count / 2
+                                                def rootFile = dir.resolve(String.format("root-file-%02d.txt", midFileIndex))
+                                                def subFile = subdir.resolve(String.format("sub-file-%02d.txt", midFileIndex))
+                                                def rootContent = rootFile.text
+                                                def subContent = subFile.text
+                                                
+                                                rootFile.delete()
+                                                subFile.delete()
+                                                
+                                                rootFile.text = rootContent
+                                                subFile.text = subContent
                                             }
 
-        'Rename-Shuffle'                 | { Path dir ->
+        'Rename-Shuffle'                 | { Path dir, int count ->
                                                 // Technique: Create files with temporary names and rename them in a non-alphabetical order.
                                                 // Goal: The final directory entry order might be influenced by the timing of the rename operations.
-                                                def tmpA = dir.resolve('tmp-a')
-                                                def tmpB = dir.resolve('tmp-b')
-                                                def tmpS = dir.resolve('tmp-s')
-                                                def tmpZ = dir.resolve('tmp-z')
-                                                // Create temp files/dirs
-                                                tmpA.text = 'content-a'
-                                                tmpB.text = 'content-b'
-                                                tmpS.mkdir()
-                                                tmpS.resolve('c.txt').text = 'content-c'
-                                                tmpZ.text = 'content-z'
-                                                // Rename in reverse order
-                                                Files.move(tmpZ, dir.resolve('z.txt'))
-                                                Files.move(tmpS, dir.resolve('subdir'))
-                                                Files.move(tmpB, dir.resolve('b.txt'))
-                                                Files.move(tmpA, dir.resolve('a.txt'))
+                                                def tmpDir = dir.resolve('__tmp')
+                                                tmpDir.mkdir()
+                                                def tmpSubDir = tmpDir.resolve('__subdir')
+                                                tmpSubDir.mkdir()
+                                                
+                                                // Create all files with temporary names
+                                                (1..count).each { i ->
+                                                    tmpDir.resolve("tmp-root-${i}").text = "content for root file ${i}"
+                                                    tmpSubDir.resolve("tmp-sub-${i}").text = "content for sub file ${i}"
+                                                }
+                                                
+                                                // Rename them to their final destination in reverse order
+                                                def finalSubDir = dir.resolve('subdir')
+                                                finalSubDir.mkdir()
+                                                (count..1).each { i ->
+                                                    Files.move(tmpDir.resolve("tmp-root-${i}"), dir.resolve(String.format("root-file-%02d.txt", i)))
+                                                    Files.move(tmpSubDir.resolve("tmp-sub-${i}"), finalSubDir.resolve(String.format("sub-file-%02d.txt", i)))
+                                                }
+                                                tmpDir.deleteDir()
                                             }
     }
 }
